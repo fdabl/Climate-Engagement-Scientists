@@ -1,0 +1,478 @@
+---
+title: "Sample Representativity Analysis"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: Noel Strahm, Fabian Dablander
+header-includes:
+   - "\\usepackage{booktabs}"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, eval = TRUE,
+  fig.align = 'center', fig.width = 12, fig.height = 10, dpi = 300,
+  out.width = '100%', out.height = '100%'
+)
+```
+
+# Setup
+This document runs the sample representativity analyses reported in the supplement of the paper "Climate Change Engagement of Scientists".
+
+The `combined_data.RDS` file includes both the Scopus data and the survey data. We cannot make this data set publicly available, as it links the participants of our survey with data from Scopus, which includes exact citation counts, number of co-authors, first publication, last publication, h-index, etc. This would make it more likely that participants could be identified.
+
+```{r}
+library(gt)
+library(dplyr)
+library(ggpubr)
+library(tidyverse)
+library(gtsummary)
+
+# Constants for Plots and Tables
+default_font_color <- '#444444' 
+default_background_color <- 'white'
+default_font_family <- 'Helvetica' 
+default_font_size <- 15
+default_na_col <- '#E22030'
+default_plotly_height <- 550
+default_plotly_width <- 800
+colors <- c('#FC4E07','#00AFBB', '#E7B800', '#2cc990', '#E090DF', '#a0c4ff')
+
+theme_minimal2 <- theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# Convert haven_labelled columns to numeric
+convert_to_numeric <- function(x) {
+  if (inherits(x, 'haven_labelled')) {
+    return(as.numeric(haven::zap_labels(x)))
+  }
+  return(x)
+}
+
+dat_all <- readRDS('../data/combined_data.RDS')
+dat_all <- dat_all %>% mutate(across(everything(), convert_to_numeric))
+
+# Replace -99 values with NA
+dat_all[dat_all== -99] <- NA
+
+dat_all <- dat_all %>%
+    mutate(
+      Survey_Finished = case_when(
+        Progress >= 100 ~ T, # People who finished the survey
+        Progress < 100 ~ F,  # People who did not finish the survey
+        is.na(Progress) ~ F) # People who didn't start the survey
+  ) %>% 
+  select(
+    ResponseId, H.Index, Number.of.Documents, Cited.By, Citation.Count,
+    Co.Author.Count, First.Publication, Last.Publication, Continent,
+    Time_Zone, Email_Wave, Survey_Finished, Progress, SurveySource
+  )
+
+# Make factors out of variables
+factor_cols <- c(
+  'ResponseId', 'Continent', 'Time_Zone',
+  'Email_Wave', 'Survey_Finished', 'SurveySource'
+)
+
+dat_all[factor_cols] <- lapply(dat_all[factor_cols], as_factor) 
+
+# Create data.frame for comparison 
+comp <- rbind(
+  transform(dat_all, Sample = 'Total Sample'),
+  transform(dat_all[dat_all$Survey_Finished == T,], Sample = 'Survey')
+)
+```
+
+# Sample Representativity 
+The following section compares the total sample of invited scientists (*N* = 249,876) to the sample that actually participated in our study (*n* = 9,220).
+
+## Continent
+This table shows the share of scientists for each continent for our Total Sample and the scientists that completed our survey. It can be observed that European scientists are considerably over-represented, whereas Asian scientists are clearly underrepresented. Scientists based in North America, South America, Oceania and Africa are only slightly underrepresented in our survey. Note that we do not have country / continent information for each participant.
+
+```{r Continent Table}
+# Table Continent
+# Change unknown Continent to NA
+levels(comp$Continent)[7] <- NA
+
+t <- tbl_cross(comp,
+          row = Continent,
+          col = Sample,
+          percent = 'col',
+          missing = 'no',
+          label = list(Sample ~ 'Sample Comparison',
+                       Continent ~ 'Continent')) %>%
+  modify_column_hide(columns = stat_0) %>% # Removes Total Column
+  bold_labels() 
+
+t
+```
+
+## Year of First Publication
+```{r yofp}
+# Refactor Sample so that Survey Population will be in front
+comp$Sample <- factor(comp$Sample, levels = c('Total Sample', 'Survey'))
+
+# Year of First publication
+p_year <- comp %>%
+  ggplot(aes(x = First.Publication, fill = Sample, col = Sample)) + 
+  geom_density(alpha = 0.6) +
+  # Add Median for total Sample
+  geom_vline(data = comp[comp$Sample == 'Total Sample',] , 
+             aes(xintercept = median(First.Publication, na.rm = T)),
+             linetype = 'longdash',
+             color = colors[1]) + 
+  # Add Median for people who finished the survey
+  geom_vline(data = comp[comp$Sample == 'Survey',] , 
+             aes(xintercept = median(First.Publication, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[2]) + 
+  scale_fill_manual(values = colors[1:2])+
+  scale_color_manual(values = colors[1:2]) +
+  scale_x_continuous(breaks = seq(1960,2025,5),
+                     limits = c(1960, 2025)) +
+  labs(title = 'Sample Comparison',
+       subtitle = 'Lines indicate the Median',
+       x = 'Year of first publication') +
+  theme_minimal2 
+
+p_year
+```
+
+## H-Index Scopus
+```{r h-index}
+# H-Index
+p_hindex <- comp %>%
+  ggplot(aes(x = H.Index, fill = Sample, col = Sample)) + 
+  geom_density(alpha = 0.6) +
+  # Add Median for total Sample
+  geom_vline(data = comp[comp$Sample == 'Total Sample',] , 
+             aes(xintercept = median(H.Index, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[1]) + 
+  # Add Median for people who finished the survey
+  geom_vline(data = comp[comp$Sample == 'Survey',] , 
+             aes(xintercept = median(H.Index, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[2]) + 
+  scale_fill_manual(values = colors[1:2])+
+  scale_color_manual(values = colors[1:2]) +
+  scale_x_continuous(breaks = seq(0,125,10),
+                     limits = c(0, 125)) +
+  labs(title='Sample Comparison',
+       subtitle = 'Lines indicate the Median',
+       x = 'H-Index') +
+  theme_minimal2 
+
+p_hindex
+```
+
+## Number of Articles
+```{r ndoc}
+# Number of Articles
+p_articles <- comp %>%
+  ggplot(aes(x = Number.of.Documents, fill = Sample, col = Sample)) + 
+  geom_density(alpha = 0.6) +
+  # Add Median for total Sample
+  geom_vline(data = comp[comp$Sample == 'Total Sample',] , 
+             aes(xintercept = median(Number.of.Documents, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[1]) + 
+  # Add Median for people who finished the survey
+  geom_vline(data = comp[comp$Sample == 'Survey',] , 
+             aes(xintercept = median(Number.of.Documents, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[2]) + 
+  scale_fill_manual(values = colors[1:2])+
+  scale_color_manual(values = colors[1:2]) +
+  scale_x_continuous(breaks = seq(0,400,50),
+                     limits = c(0, 400)) +
+  labs(title = 'Sample Comparison',
+       subtitle = 'Lines indicate the Median',
+       x = 'Number of Documents authored') +
+  theme_minimal2 
+
+p_articles
+```
+
+## Citations
+```{r tnoc}
+# Number of Citations
+p_citations <- comp %>%
+  ggplot(aes(x = Citation.Count, fill = Sample, col = Sample)) + 
+  geom_density(alpha = 0.6) +
+  # Add Median for total Sample
+  geom_vline(data = comp[comp$Sample == 'Total Sample',] , 
+             aes(xintercept = median(Citation.Count, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[1]) + 
+  # Add Median for people who finished the survey
+  geom_vline(data = comp[comp$Sample == 'Survey',] , 
+             aes(xintercept = median(Citation.Count, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[2]) + 
+  scale_fill_manual(values = colors[1:2])+
+  scale_color_manual(values = colors[1:2]) +
+  scale_x_continuous(breaks = seq(0,6000,500),
+                     limits = c(0, 6000)) +
+  labs(title = 'Sample Comparison',
+       subtitle = 'Lines indicate the Median',
+       x = 'Total Number of Citations') +
+  theme_minimal2 
+
+p_citations
+```
+
+## Cited By
+```{r cited.by}
+# Citing Authors
+p_citedby <- comp %>%
+  ggplot(aes(x = Cited.By, fill = Sample, col = Sample)) + 
+  geom_density(alpha = 0.6) +
+  # Add Median for total Sample
+  geom_vline(data = comp[comp$Sample == 'Total Sample',] , 
+             aes(xintercept = median(Cited.By, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[1]) + 
+  # Add Median for people who finished the survey
+  geom_vline(data = comp[comp$Sample == 'Survey',] , 
+             aes(xintercept = median(Cited.By, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[2]) + 
+  scale_fill_manual(values = colors[1:2])+
+  scale_color_manual(values = colors[1:2]) +
+  scale_x_continuous(breaks = seq(0,4000,500),
+                    limits = c(0, 4000)) +
+  labs(title = 'Sample Comparison',
+       subtitle = 'Lines indicate the Median',
+       x = 'Total Number of Citing Authors') +
+  theme_minimal2 
+
+p_citedby
+```
+
+## Co-Author Count
+```{r co_authors}
+# Number of Co-Authors
+p_coauthors <- comp %>%
+  ggplot(aes(x = Co.Author.Count, fill = Sample, col = Sample)) + 
+  geom_density(alpha = 0.6) +
+  # Add Median for total Sample
+  geom_vline(data = comp[comp$Sample == 'Total Sample',] , 
+             aes(xintercept = median(Co.Author.Count, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[1]) + 
+  # Add Median for people who finished the survey
+  geom_vline(data = comp[comp$Sample == 'Survey',] , 
+             aes(xintercept = median(Co.Author.Count, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[2]) + 
+  scale_fill_manual(values = colors[1:2])+
+  scale_color_manual(values = colors[1:2]) +
+  scale_x_continuous(breaks = seq(0,600,50),
+                    limits = c(0, 600)) +
+  labs(title='Sample Comparison',
+       subtitle = 'Lines indicate the Median',
+       x = 'Total Number of Co-Authors') +
+  theme_minimal2 
+
+p_coauthors
+```
+
+## Combined Figure
+```{r combined plot, echo = FALSE}
+# Year of First publication
+p_year <- comp %>%
+  ggplot(aes(x = First.Publication, fill = Sample, col = Sample)) + 
+  geom_density(alpha = 0.6) +
+  geom_vline(data = comp[comp$Sample == 'Total Sample',] , 
+             aes(xintercept = median(First.Publication, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[1]) + 
+  geom_vline(data = comp[comp$Sample == 'Survey',] , 
+             aes(xintercept = median(First.Publication, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[2]) +
+  scale_fill_manual(name = '',
+                    values = colors[1:2],
+                    labels = c('Scopus sample', 'Survey sample')) +
+  scale_color_manual(name = '',
+                     values = colors[1:2],
+                     labels = c('Scopus sample', 'Survey sample')) +
+  scale_x_continuous(breaks = seq(1960,2030,10),
+                     limits = c(1960, 2025)) +
+  scale_y_continuous(breaks = NULL) +
+  labs(x='Year of first publication', y='Density') +
+  theme_minimal2 
+
+# H-Index
+p_h <- comp %>%
+  ggplot(aes(x = H.Index, fill =Sample, col = Sample)) + 
+  geom_density(alpha = 0.6) +
+  geom_vline(data = comp[comp$Sample == 'Total Sample',] , 
+             aes(xintercept = median(H.Index, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[1]) + 
+  geom_vline(data = comp[comp$Sample == 'Survey',] , 
+             aes(xintercept = median(H.Index, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[2]) +
+  scale_fill_manual(name = '',
+                    values = colors[1:2],
+                    labels = c('Scopus sample', 'Survey sample'))+
+  scale_color_manual(name = '',
+                     values = colors[1:2],
+                     labels = c('Scopus sample', 'Survey sample')) +
+  scale_x_continuous(breaks = seq(0,125,20),
+                     limits = c(0, 125)) +
+  scale_y_continuous(breaks = NULL) +
+  labs(x = 'H-Index', y = 'Density') +
+  theme_minimal2 
+
+# Number of articles
+p_art <- comp %>%
+  ggplot(aes(x = Number.of.Documents, fill = Sample, col = Sample)) + 
+  geom_density(alpha = 0.6) +
+  geom_vline(data = comp[comp$Sample == 'Total Sample',] , 
+             aes(xintercept = median(Number.of.Documents, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[1]) + 
+  geom_vline(data = comp[comp$Sample == 'Survey',] , 
+             aes(xintercept = median(Number.of.Documents, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[2]) +
+  scale_fill_manual(name = '',
+                    values = colors[1:2],
+                    labels = c('Scopus sample', 'Survey sample'))+
+  scale_color_manual(name = '',
+                     values = colors[1:2],
+                     labels = c('Scopus sample', 'Survey sample')) +
+  scale_x_continuous(breaks = seq(0,400,50),
+                     limits = c(0, 400)) +
+  scale_y_continuous(breaks = NULL) +
+  labs(x = 'Number of documents authored', y='Density') +
+  theme_minimal2 
+
+# Citing Authors
+p_citby <- comp %>%
+  ggplot(aes(x = Cited.By, fill = Sample, col = Sample)) + 
+  geom_density(alpha = 0.6) +
+  geom_vline(data = comp[comp$Sample == 'Total Sample',] , 
+             aes(xintercept = median(Cited.By, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[1]) + 
+  geom_vline(data = comp[comp$Sample == 'Survey',] , 
+             aes(xintercept = median(Cited.By, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[2]) +
+  scale_fill_manual(name = '',
+                    values = colors[1:2],
+                    labels = c('Scopus sample', 'Survey sample'))+
+  scale_color_manual(name = '',
+                     values = colors[1:2],
+                     labels = c('Scopus sample', 'Survey sample')) +
+  scale_x_continuous(breaks = seq(0,10000,2000),
+                     limits = c(0, 10000)) +
+  scale_y_continuous(breaks = NULL) +
+  labs(x = 'Total number of citing authors', y='Density') +
+  theme_minimal2 
+
+# Number of Citations
+p_cit_n <- comp %>%
+  ggplot(aes(x = Citation.Count, fill = Sample, col = Sample)) + 
+  geom_density(alpha = 0.6) +
+  geom_vline(data = comp[comp$Sample == 'Total Sample',] , 
+             aes(xintercept = median(Citation.Count, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[1]) + 
+  geom_vline(data = comp[comp$Sample == 'Survey',] , 
+             aes(xintercept = median(Citation.Count, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[2]) +
+  scale_fill_manual(name = '',
+                    values = colors[1:2],
+                    labels = c('Scopus sample', 'Survey sample'))+
+  scale_color_manual(name = '',
+                     values = colors[1:2],
+                     labels = c('Scopus sample', 'Survey sample')) +
+  scale_x_continuous(breaks = seq(0,6000,1000),
+                     limits = c(0, 6000)) +
+  scale_y_continuous(breaks = NULL) +
+  labs(x = 'Total number of citations', y='Density') +
+  theme_minimal2 
+
+
+# Number of Co-Authors
+p_aut <- comp %>%
+  ggplot(aes(x = Co.Author.Count, fill = Sample, col = Sample)) + 
+  geom_density(alpha = 0.6) +
+  geom_vline(data = comp[comp$Sample == 'Total Sample',] , 
+             aes(xintercept = median(Co.Author.Count, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[1]) + 
+  geom_vline(data = comp[comp$Sample == 'Survey',] , 
+             aes(xintercept = median(Co.Author.Count, na.rm = T)),
+             linetype = 'dashed',
+             color = colors[2]) +
+  scale_fill_manual(name = '',
+                    values = colors[1:2],
+                    labels = c('Scopus sample', 'Survey sample'))+
+  scale_color_manual(name = '',
+                     values = colors[1:2],
+                     labels = c('Scopus sample', 'Survey sample')) +
+  scale_x_continuous(breaks = seq(0,600,100),
+                     limits = c(0, 600)) +
+  scale_y_continuous(breaks = NULL) +
+  labs(x = 'Total number of co-authors', y='Density') +
+  theme_minimal2
+
+combined_plot <- ggarrange(
+  p_year, p_h + ylab(''), p_art + ylab(''), p_cit_n, p_citby + ylab(''), p_aut + ylab(''),
+  ncol = 3, nrow = 2, common.legend = T, legend = 'top'
+)
+
+combined_plot
+
+ggsave('../figures/figureEx2_sample_comparison.pdf',
+       plot = combined_plot,
+       width = 9,
+       height = 7,
+       dpi = 300,
+       bg = 'white')
+```
+
+## Combined Table: Mean
+```{r}
+# Overview the Sample
+comp$Sample <- factor(comp$Sample, levels = c('Survey', 'Total Sample'))
+
+# Mean
+t_mean <- comp %>%
+  select(Sample, H.Index, Number.of.Documents, Cited.By, Citation.Count, Co.Author.Count, First.Publication,
+         Continent) %>%
+  tbl_summary(by = Sample,
+              missing = 'no',
+              type = where(is.numeric) ~ 'continuous', 
+              statistic = list(all_categorical() ~ '{n} ({p}%)',
+                               all_continuous() ~ '{mean} ({sd})'))
+
+t_mean
+```
+
+## Combined Table: Median
+```{r}
+# Median
+t_med <- comp %>%
+  select(Sample, H.Index, Number.of.Documents, Cited.By, Citation.Count, Co.Author.Count, First.Publication,
+         Continent) %>%
+  tbl_summary(by = Sample,
+              missing = 'no',
+              type = where(is.numeric) ~ 'continuous', 
+              statistic = list(all_categorical() ~ '{n} ({p}%)',
+                               all_continuous() ~ '{median} ({sd})'))
+t_med
+```

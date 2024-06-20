@@ -1,0 +1,1530 @@
+---
+title: "Quantitative Data Analysis"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: Fabian Dablander, Noel Strahm
+header-includes:
+   - "\\usepackage{booktabs}"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, eval = TRUE, cache = FALSE,
+  fig.align = 'center', fig.width = 12, fig.height = 10, dpi = 300,
+  out.width='100%', out.height='100%'
+)
+```
+
+<!-- avoid border around images -->
+<style>
+    img {
+        border: 0;
+    }
+</style>
+
+# Setup
+This document runs the statistical analyses reported in the paper "Climate Change Engagement of Scientists".
+
+```{r}
+library(brms)
+library(caret)
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(forcats)
+library(corrplot)
+library(tidyverse)
+library(qualtRics)
+library(doParallel)
+library(kableExtra)
+library(RColorBrewer)
+library(marginaleffects)
+source('../helpers.R')
+
+ptheme <- theme(
+  plot.title = element_text(hjust = .5),
+  text = element_text(size = 14),
+  legend.key = element_blank(),
+  panel.background = element_blank(),
+  legend.position = 'none',
+  axis.line.x = element_line(),
+  axis.line.y = element_line(),
+  strip.background = element_blank()
+)
+ptheme2 <- ptheme + theme(legend.position = 'bottom')
+```
+
+# Data preparation
+We load the (anonymized) data (created with `remove_identifying.R`) and create variables useful for the subsequent analyses.
+
+```{r}
+dat_num <- readRDS('../data/DataS1_Anonymized.RDS')
+std <- function(x) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
+
+dat_num <- dat_num %>% 
+  mutate(
+    
+    # Create dummy variables
+    is_tenured = as.numeric(Tenure == 1),
+    activism_effective = ToC1_9,
+    local_effective = ToC1_7,
+    is_male = as.numeric(Gender == 1 | open_gender == 'Male'),
+    is_female = as.numeric(Gender == 2 | open_gender == 'Female'),
+    
+    # Collapse non-binary, prefer to self-describe, prefer not to say
+    is_gender_other = as.numeric(!(Gender %in% c(1, 2) | open_gender == 'Prefer to self-describe')),
+    is_professor = as.numeric(Position == 5),
+    
+    # Natural science as reference category
+    humanities = as.numeric(
+      Field == 1 | open_field == "Humanities (e.g., History, Languages, Law)"
+    ),
+    social_science = as.numeric(
+      Field == 2 | open_field == "Social and behavioral sciences (e.g., Economics, Sociology, Psychology)"
+    ),
+    formal_science = as.numeric(
+      Field == 4 | open_field == "Formal sciences (e.g., Computer science, Logic, Mathematics)"
+    ),
+    applied_science = as.numeric(
+      Field == 5 | open_field == "Professions and applied sciences (e.g., Agriculture, Engineering)"
+    ),
+    medical_science = as.numeric(open_field == "Medical sciences"),
+    other_science = as.numeric(open_field == "Other, please specify:"),
+    softer_science = humanities + social_science + formal_science + medical_science + other_science,
+    
+    # Standardize numeric predictors
+    Age_std = std(Age),
+    Political_std = std(Political),
+    Lifestyle_std = std(Lifestyle),
+    ImpactSelf_std = std(ImpactSelf),
+    Worry_std = std(Worry),
+    Informed_std = std(Informed),
+    ResponsibilityPers_std = std(ResponsibilityPers),
+    ResponsibilitySci_std = std(ResponsibilitySci),
+    ResponsibilityInst_std = std(ResponsibilityInst),
+    Research_std = std(Research),
+    Credibility_1_std = std(Credibility_1),
+    Credibility_2_std = std(Credibility_2),
+    RoleSci_1_std = std(RoleSci_1),
+    RoleSci_2_std = std(RoleSci_2),
+    RoleSci_3_std = std(RoleSci_3),
+    RoleSci_4_std = std(RoleSci_4),
+    
+    ToC1_1_std = std(ToC1_1),
+    ToC1_2_std = std(ToC1_2),
+    ToC1_3_std = std(ToC1_3),
+    ToC1_4_std = std(ToC1_4),
+    ToC1_5_std = std(ToC1_5),
+    ToC1_6_std = std(ToC1_6),
+    ToC1_7_std = std(ToC1_7),
+    ToC1_8_std = std(ToC1_8),
+    ToC1_9_std = std(ToC1_9)
+  )
+```
+
+For ease of interpreting the models, we map the variable names to more interpretable variable names, as specified below.
+
+```{r}
+predictor_names <- c(
+  'Intercept' = 'Intercept',
+  'Age_std' = 'Age',
+  'Worry_std' = 'Worry',
+  'Political_std' = 'Political orientation',
+  'Lifestyle_std' = 'Carbon-intensity of lifestyle',
+  'ImpactSelf_std' = 'Believed climate impacts on self',
+  'Informed_std' = 'Informed on climate',
+  'InnerCircle' = 'Advocate / activist in inner circle',
+  'Research_std' = 'Research relevant to climate',
+  'ResponsibilityPers_std' = 'Personal responsibility',
+  'ResponsibilitySci_std' = 'Academic responsibility',
+  'ResponsibilityInst_std' = 'Responsibility of institutions',
+  'is_female' = 'Female',
+  'is_gender_other' = 'Non-binary / self-described / not disclosed',
+  'Credibility_1_std' = 'Protest would diminish credibility',
+  'Credibility_2_std' = 'Advocacy would diminish credibility',
+  'RoleSci_2_std' = 'Academics should protest more',
+  'RoleSci_4_std' = 'Academics should advocate more',
+  'is_professor' = 'Full professor',
+  'is_tenured' = 'Tenure',
+  'humanities' = 'Humanities',
+  'social_science' = 'Social sciences',
+  'formal_science' = 'Formal sciences',
+  'applied_science' = 'Applied sciences',
+  'medical_science' = 'Medical sciences',
+  'other_science' = 'Other sciences',
+  'softer_science' = 'Softer science',
+  'Worry_std' = 'Worry',
+  
+  # Advocacy barriers
+  'barriers_1' = 'Negatively affect reputation',
+  'barriers_2' = 'Potential repercussions',
+  'barriers_3' = 'Do not know enough about climate to engage',
+  'barriers_4' = 'Do not know any groups',
+  'barriers_5' = 'Not convinced of impact',
+  'barriers_6' = 'No time',
+  'barriers_7' = 'Lifestyle too carbon-intense',
+  
+  # Protest barriers
+  'barriers_8' = 'Negatively affect reputation',
+  'barriers_9' = 'Potential repercussions',
+  'barriers_10' = 'Do not know enough about climate to engage',
+  'barriers_11' = 'Do not know any groups',
+  'barriers_12' = 'Not convinced of impact',
+  'barriers_13' = 'No time',
+  'barriers_14' = 'Lifestyle too carbon-intense',
+  
+  'ToC1_1_std' = 'Not much we can do',
+  'ToC1_2_std' = 'Technology will solve problem',
+  'ToC1_3_std' = 'Scientific institutions do enough',
+  'ToC1_4_std' = 'System change required',
+  'ToC1_5_std' = 'Lifestyle change required',
+  'ToC1_7_std' = 'Local actions are effective',
+  'ToC1_9_std' = 'Activists can drive change'
+)
+
+interaction_names <- paste0(predictor_names, ':Research relevant to climate')
+names(interaction_names) <- paste0(names(predictor_names), ':Research_std')
+predictor_names <- c(predictor_names, interaction_names)
+
+
+# Used to order the variables in the figure
+categories <- list(
+  'Background' = c(
+    'Age', 'Political orientation', 'Carbon-intensity of lifestyle',
+    'Research relevant to climate', 'Female', 'Non-binary / self-described / not disclosed',
+    'Full professor', 'Tenure', 'Softer science'
+  ),
+  
+  'Intellectual' = c(
+    'Worry', 'Believed climate impacts on self', 'Informed on climate',
+    'Personal responsibility', 'Academic responsibility', 'Responsibility of institutions',
+    'Protest would diminish credibility', 'Advocacy would diminish credibility',
+    'Academics should protest more', 'Academics should advocate more',
+    'Do not know enough about climate to engage', 'Not convinced of impact',
+    'Lifestyle too carbon-intense', 'Not much we can do', 'Technology will solve problem',
+    'Scientific institutions do enough', 'System change required', 'Lifestyle change required',
+    'Local actions are effective', 'Activists can drive change'
+  ),
+  
+  'Practical' = c(
+    'Negatively affect reputation', 'Potential repercussions',
+    'Do not know any groups', 'No time', 'Advocate / activist in inner circle'
+  )
+)
+```
+
+We create a data frame that has the relevant outcome and predictor variables.
+
+```{r}
+dat_prep <- dat_num %>% 
+  # We add the protest barriers as barriers_1 ... barriers_7
+  add_barriers('BarrierLegal', barriers_numbers = seq(7)) %>% 
+  
+  # We add the advocacy barriers as barriers_8 ... barriers_14
+  add_barriers('BarrierEngPub', barriers_numbers = seq(8, 14)) %>% 
+
+  select(
+    ResponseId,
+    
+    # Demographics
+    Age_std,
+    Worry_std,
+    Political_std,
+    Lifestyle_std,
+    InnerCircle,
+    Research_std,
+    is_professor, is_tenured, is_female, is_gender_other, softer_science,
+    
+    # Climate beliefs
+    ImpactSelf_std,
+    Informed_std,
+    Worry_std,
+    ResponsibilityPers_std,
+    ResponsibilitySci_std,
+    ResponsibilityInst_std,
+    
+    # Role of scientists / credibility
+    RoleSci_1_std,
+    RoleSci_2_std,
+    RoleSci_3_std,
+    RoleSci_4_std,
+    Credibility_1_std,
+    Credibility_2_std,
+    
+    # 'Theory of change'
+    ToC1_1_std,
+    ToC1_2_std,
+    ToC1_3_std,
+    ToC1_4_std,
+    ToC1_5_std,
+    ToC1_6_std,
+    ToC1_7_std,
+    ToC1_8_std,
+    ToC1_9_std,
+    
+    # Barrier predictor variables
+    starts_with('barriers_'),
+    
+    # Outcome variables (behaviors)
+    starts_with('Beh_incNotApp'), starts_with('Beh_others'), BehLegal, Beh_EngPub
+  )
+
+# For the % missing check, remove variables that we do not use in the models
+dat_check <- dat_prep %>% 
+  select(-RoleSci_1_std, -RoleSci_3_std, -ToC1_6_std, -ToC1_8_std)
+```
+
+We find that about 5.53% of people have not responded to at least one of them.
+
+```{r}
+1 - (nrow(na.omit(dat_check)) / nrow(dat_num))
+```
+
+This is a bit high, so we impute these missing values.
+
+```{r}
+library(missForest)
+doParallel::registerDoParallel(cores = 8)
+
+# Impute missing values
+if (!file.exists('../data/DataS2_Imputed.RDS')) {
+  d <- data.frame(dat_prep[, -1])
+  d <- d %>% mutate(across(where(is.numeric), as.factor))
+  dat_imp <- missForest(d, parallelize = 'variables', variablewise = TRUE, ntree = 10000, verbose = TRUE)
+  saveRDS(dat_imp, '../data/DataS2_Imputed.RDS')
+} else {
+  dat_imp <- readRDS('../data/DataS2_Imputed.RDS')
+}
+```
+
+We then create the final data set, which includes the number of climate actions.
+
+```{r}
+to_numeric <- function(x) as.numeric(as.character(x))
+
+dat_final <- dat_imp$ximp %>% 
+  mutate(across(where(is.factor), to_numeric)) %>% 
+  mutate(
+    nr_actions = (
+      (Beh_incNotApp_1 == 2) + 
+      (Beh_incNotApp_2 == 2) + 
+      (Beh_incNotApp_3 == 2) + 
+      (Beh_incNotApp_4 == 2) + 
+      (Beh_incNotApp_5 == 2) + 
+      (Beh_incNotApp_6 == 2) + 
+      (Beh_incNotApp_7 == 2) + 
+      (Beh_incNotApp_8 == 2) +
+      (Beh_others_1 == 2) +
+      (Beh_others_2 == 2) +
+      (Beh_others_3 == 2) +
+      (Beh_others_4 == 2) +
+      (Beh_others_5 == 2) +
+      (Beh_others_6 == 2) +
+      (Beh_others_7 == 2)
+    ),
+    
+    nr_lifestyle_actions = (
+      (Beh_incNotApp_1 == 2) + 
+      (Beh_incNotApp_2 == 2) + 
+      (Beh_incNotApp_3 == 2) + 
+      (Beh_incNotApp_4 == 2) + 
+      (Beh_incNotApp_7 == 2) +
+      (Beh_incNotApp_8 == 2)
+    ),
+    
+    nr_advocacy_actions = (
+      (Beh_incNotApp_5 == 2) + 
+      (Beh_incNotApp_6 == 2) + 
+      (Beh_others_1 == 2) +
+      (Beh_others_2 == 2) +
+      (Beh_others_3 == 2) +
+      (Beh_others_4 == 2) +
+        
+      # Teaching and shifting research to include climate not counted
+      # (Beh_others_5 == 2) +
+      # (Beh_others_6 == 2) +
+      (Beh_others_7 == 2)
+    ),
+    
+    reduced_car = as.numeric(Beh_incNotApp_1 == 2),
+    electric_vehicle = as.numeric(Beh_incNotApp_2 == 2),
+    energy_home = as.numeric(Beh_incNotApp_3 == 2),
+    fewer_children = as.numeric(Beh_incNotApp_4 == 2),
+    talk_climate = as.numeric(Beh_incNotApp_5 == 2),
+    donate_money = as.numeric(Beh_incNotApp_6 == 2),
+    veggie_diet = as.numeric(Beh_incNotApp_7 == 2),
+    reduced_flying = as.numeric(Beh_incNotApp_8 == 2),
+    
+    signed_petitions = as.numeric(Beh_others_1 == 2),
+    advocated_change = as.numeric(Beh_others_2 == 2),
+    engaged_policymakers = as.numeric(Beh_others_3 == 2),
+    wrote_letters = as.numeric(Beh_others_4 == 2),
+    shifted_research = as.numeric(Beh_others_5 == 2),
+    included_teaching = as.numeric(Beh_others_6 == 2),
+    engaged_disobedience = as.numeric(Beh_others_7 == 2)
+  )
+
+if (!file.exists('../data/DataS3_Final.RDS')) {
+  saveRDS(dat_final, '../data/DataS3_Final.RDS') # used in create_figure1.R
+}
+```
+
+We add participant id and continent back in for the multilevel model specification. Note that we code countries for which we have no entries and countries for which there are less than 10 observations as `not specified`.
+
+```{r}
+dat_final$id <- seq(nrow(dat_final))
+dat_final$continent <- dat_num$Continent
+dat_final$country <- ifelse(is.na(dat_num$Country), 'not specified', dat_num$Country)
+dat_final$continent <- ifelse(dat_final$country == 'not specified', 'NA', dat_final$continent)
+```
+
+We specify the predictor variables.
+
+```{r}
+predictor_vars <- 'Age_std + Political_std + Lifestyle_std + ImpactSelf_std +
+  Worry_std + Informed_std + InnerCircle + Research_std +
+  ResponsibilityPers_std + ResponsibilitySci_std + ResponsibilityInst_std +
+  is_female + is_gender_other +
+  Credibility_1_std + Credibility_2_std + RoleSci_2_std + RoleSci_4_std +
+  ToC1_1_std + ToC1_2_std + ToC1_3_std + ToC1_4_std + ToC1_5_std + ToC1_7_std + ToC1_9_std +
+  is_professor + is_tenured + softer_science'
+
+ml_vars_countr <- '(1 | country)'
+```
+
+We create the formula objects that will be needed below.
+
+```{r}
+# Add the barriers to the predictors
+barriers_protest <- paste0(paste0('barriers_', seq(7)), collapse = ' + ')
+barriers_advocacy <- paste0(paste0('barriers_', seq(8, 14)), collapse = ' + ')
+
+pred_barrier_advocacy_vars <- paste0(predictor_vars, ' + ', barriers_advocacy)
+pred_barrier_protest_vars <- paste0(predictor_vars, ' + ', barriers_protest)
+
+form_protest <- as.formula(paste0('BehLegal ~ ', pred_barrier_protest_vars))
+form_advocacy <- as.formula(paste0('Beh_EngPub ~ ', pred_barrier_advocacy_vars))
+form_disobedience <- as.formula(paste0('Beh_others_7 ~ ', predictor_vars))
+
+# Add random intercept
+form_protest_ml <- as.formula(paste0('BehLegal ~ ', pred_barrier_protest_vars, ' + ', ml_vars_countr))
+form_advocacy_ml <- as.formula(paste0('Beh_EngPub ~ ', pred_barrier_advocacy_vars, ' + ', ml_vars_countr))
+form_disobedience_ml <- as.formula(paste0('Beh_others_7 ~ ', predictor_vars, ' + ', ml_vars_countr))
+```
+
+We prepare the data sets for the different contrasts and outcomes below.
+
+```{r}
+# Remove "already do / did", need to then re-standardize the variables
+dat_protest_wnw <- dat_final %>%
+  filter(BehLegal != 2) %>%
+  mutate_at(vars(ends_with('_std'), starts_with('barriers')), std)
+
+dat_adv_wnw <- dat_final %>%
+  filter(Beh_EngPub != 2) %>% 
+  mutate_at(vars(ends_with('_std'), starts_with('barriers')), std)
+
+dat_dis_wnw <- dat_final %>%
+  filter(Beh_others_7 != 2) %>%
+  mutate_at(vars(ends_with('_std'), starts_with('barriers')), std)
+
+# Remove "not willing to", recode rest to be 0/1, and re-standardize variables
+dat_protest_aw <- dat_final %>%
+  filter(BehLegal != 0) %>% 
+  mutate(BehLegal = BehLegal - 1) %>% 
+  mutate_at(vars(ends_with('_std'), starts_with('barriers')), std)
+
+dat_adv_aw <- dat_final %>%
+  filter(Beh_EngPub != 0) %>%
+  mutate(Beh_EngPub = Beh_EngPub - 1) %>% 
+  mutate_at(vars(ends_with('_std'), starts_with('barriers')), std)
+
+dat_dis_aw <- dat_final %>%
+  filter(Beh_others_7 != 0) %>%
+  mutate(Beh_others_7 = Beh_others_7 - 1) %>% 
+  mutate_at(vars(ends_with('_std'), starts_with('barriers')), std)
+```
+
+# Main analyses
+## Individual logistic regressions
+Here we run individual Bayesian multilevel — random intercepts and random slopes for country — logistic regressions for each predictor across different types of engagement for the contrasts *willing to* versus *not willing to* and *already do / did* versus *willing to*. Note that we did not ask the seven additional barriers for the civil disobedience item due to time constraints.
+
+We calculate marginal effects. This takes the random effects for countries into account (i.e., it does not assume they are zero and thereby calculate the effect for a "typical country", but calculates the effect for countries on average); see [here](https://www.andrewheiss.com/blog/2022/11/29/conditional-marginal-marginaleffects/) for details. In particular, we calculate marginal effects at the mean, that is, the effect of the predictors assuming all other variables are at their mean (or zero for binary variables). We report those effects in the paper. But the code below can also calculate average marginal effects. This means calculating the effect of increasing a predictor by one unit for all observations (taking into account what value the variable has for that observation, which will differ across observations) and then averaging those. These are different quantities, and the latter will exhibit smaller uncertainty ranges, since we average over many observations rather than looking at the "average" observation; for details, see [here](https://www.andrewheiss.com/blog/2022/05/20/marginalia/).
+
+```{r}
+preds_adv <- get_preds(form_advocacy)
+preds_protest <- get_preds(form_protest)
+preds_dis <- get_preds(form_disobedience)
+
+### ### ### 
+### Individual regressions, no interaction, random intercepts and random slopes
+### ### ### 
+
+# If true, calculate the marginal effect at the mean for all effects measures below
+# If false, calculate the average marginal effect
+MEM <- TRUE
+effect_type <- ifelse(MEM, '_mem', '_ame')
+if (MEM) {
+  newdata <- 'mean'
+} else {
+  newdata <- NULL
+}
+
+# Adapt to run multilevel models
+if (!file.exists(paste0('../results/individual_coefs_ml_noint', effect_type, '.RDS'))) {
+  
+  # We run an initial model to get the form (i.e., one intercept, one predictor)
+  # which we then update with different data, predictors, and outcomes
+  fit_initial <- run_individual_model(
+    form_advocacy_ml, 'barriers_10', dat_adv_aw,
+    type = 'advocacy_aw_ml_final_noint', ml = TRUE, moderation = FALSE, cores = 4, iter = 4000
+  )
+  
+  models_adv_aw <- get_mm(
+    form_advocacy_ml, preds_adv, dat_adv_aw,
+    type = 'advocacy_aw_ml_final_noint', fit_initial
+  )
+  models_adv_wnw <- get_mm(
+    form_advocacy_ml, preds_adv, dat_adv_wnw,
+    type = 'advocacy_wnw_ml_final_noint', fit_initial
+  )
+  models_protest_aw <- get_mm(
+    form_protest_ml, preds_protest, dat_protest_aw,
+    type = 'protest_aw_ml_final_noint', fit_initial
+  )
+  models_protest_wnw <- get_mm(
+    form_protest_ml, preds_protest, dat_protest_wnw,
+    type = 'protest_wnw_ml_final_noint', fit_initial
+  )
+  models_dis_aw <- get_mm(
+    form_disobedience_ml, preds_dis, dat_dis_aw,
+    type = 'dis_aw_ml_final_noint', fit_initial
+  )
+  models_dis_wnw <- get_mm(
+    form_disobedience_ml, preds_dis, dat_dis_wnw,
+    type = 'dis_wnw_final_noint', fit_initial
+  )
+  
+  nr_models <- length(models_adv_aw)
+  
+  # Effects in probabilities / percentage change
+  marginal_coefs_percentage <- bind_rows(
+    lapply(seq(nr_models), function(i) {
+      get_main_effects(
+        models_adv_aw[[i]], preds_adv[i], 'Advocacy', 'Already do vs willing to', newdata = newdata
+      )
+    }),
+    lapply(seq(nr_models), function(i) {
+      get_main_effects(
+        models_adv_wnw[[i]], preds_adv[i], 'Advocacy', 'Willing to vs not willing to', newdata = newdata
+      )
+    }),
+    lapply(seq(nr_models), function(i) {
+      get_main_effects(
+        models_protest_aw[[i]], preds_protest[i], 'Protest', 'Already do vs willing to', newdata = newdata
+      )
+    }),
+    lapply(seq(nr_models), function(i) {
+      get_main_effects(
+        models_protest_wnw[[i]], preds_protest[i], 'Protest', 'Willing to vs not willing to', newdata = newdata
+      )
+    }),
+    lapply(seq(length(models_dis_aw)), function(i) {
+      get_main_effects(
+        models_dis_aw[[i]], preds_dis[i], 'Disobedience', 'Already do vs willing to', newdata = newdata
+      )
+    }),
+    lapply(seq(length(models_dis_wnw)), function(i) {
+      get_main_effects(
+        models_dis_wnw[[i]], preds_dis[i], 'Disobedience', 'Willing to vs not willing to', newdata = newdata
+      )
+    })
+  )
+  
+  # Effects in log odds ratios
+  marginal_coefs_lor <- bind_rows(
+    lapply(seq(nr_models), function(i) {
+      get_main_effects(
+        models_adv_aw[[i]], preds_adv[i], 'Advocacy',
+        'Already do vs willing to', metric = 'logodds', comparison = 'lnor', mult = 1, newdata = newdata
+      )
+    }),
+    lapply(seq(nr_models), function(i) {
+      get_main_effects(
+        models_adv_wnw[[i]], preds_adv[i], 'Advocacy',
+        'Willing to vs not willing to', metric = 'logodds', comparison = 'lnor', mult = 1, newdata = newdata
+      )
+    }),
+    lapply(seq(nr_models), function(i) {
+      get_main_effects(
+        models_protest_aw[[i]], preds_protest[i], 'Protest',
+        'Already do vs willing to', metric = 'logodds', comparison = 'lnor', mult = 1, newdata = newdata
+      )
+    }),
+    lapply(seq(nr_models), function(i) {
+      get_main_effects(
+        models_protest_wnw[[i]], preds_protest[i], 'Protest',
+        'Willing to vs not willing to', metric = 'logodds', comparison = 'lnor', mult = 1, newdata = newdata
+      )
+    }),
+    lapply(seq(length(models_dis_aw)), function(i) {
+      get_main_effects(
+        models_dis_aw[[i]], preds_dis[i], 'Disobedience',
+        'Already do vs willing to', metric = 'logodds', comparison = 'lnor', mult = 1, newdata = newdata
+      )
+    }),
+    lapply(seq(length(models_dis_wnw)), function(i) {
+      get_main_effects(
+        models_dis_wnw[[i]], preds_dis[i], 'Disobedience',
+        'Willing to vs not willing to', metric = 'logodds', comparison = 'lnor', mult = 1, newdata = newdata
+      )
+    })
+  )
+  
+  marginal_coefs_all <- bind_rows(marginal_coefs_percentage, marginal_coefs_lor)
+  marginal_coefs_all$rowname <- predictor_names[marginal_coefs_all$rowname]
+  saveRDS(marginal_coefs_all, paste0('../results/individual_coefs_ml_noint', effect_type, '.RDS'))
+  
+} else {
+  marginal_coefs_all <- readRDS(paste0('../results/individual_coefs_ml_noint', effect_type, '.RDS'))
+}
+
+marginal_coefs_all <- marginal_coefs_all %>% 
+  filter(outcome != 'Already do vs not willing to') %>% 
+  add_categories(categories)
+
+breaks <- c(-30, -20, -10, 0, 10, 20, 30)
+
+# Figure 2: Advocacy and Protest
+plot_coefs_both(
+  filter(marginal_coefs_all, type != 'Disobedience', metric == 'absolute'),
+  breaks = breaks, order_type = 'Protest',
+  filepath = paste0('../figures/figure2_advocacy_protest', effect_type, '.pdf'),
+  xlimits = c(-35, 35), width = 10, height = 9
+)
+```
+
+Below we run the same analyses, except that we include an interaction with how related the research of the participants are to climate change. This is visualized in the supplemental analyses section further down.
+
+```{r}
+### ### ### 
+### Individual regression analyses *with* interaction of Research_std, random intercepts and random slopes
+### ### ### 
+
+rm_res <- function(x) x[x != 'Research_std']
+preds_adv_rm <- rm_res(preds_adv)
+preds_protest_rm <- rm_res(preds_protest)
+preds_dis_rm <- rm_res(preds_dis)
+
+if (!file.exists(paste0('../results/individual_coefs_ml_int', effect_type, '.RDS'))) {
+  fit_initial <- run_individual_model(
+    form_advocacy_ml, 'barriers_10', dat_adv_aw,
+    type = 'advocacy_aw_ml_rs_country_moderation_nc', ml = TRUE, moderation = TRUE, cores = 4, iter = 4000
+  )
+  
+  models_adv_aw <- get_mm(
+    form_advocacy_ml, preds_adv_rm, dat_adv_aw,
+    type = 'advocacy_aw_ml_rs_country_moderation_nc', fit_initial
+  )
+  models_adv_wnw <- get_mm(
+    form_advocacy_ml, preds_adv_rm, dat_adv_wnw,
+    type = 'advocacy_wnw_ml_rs_country_moderation_nc', fit_initial
+  )
+  models_protest_aw <- get_mm(
+    form_protest_ml, preds_protest_rm, dat_protest_aw,
+    type = 'protest_aw_ml_rs_country_moderation_nc', fit_initial
+  )
+  models_protest_wnw <- get_mm(
+    form_protest_ml, preds_protest_rm, dat_protest_wnw,
+    type = 'protest_wnw_ml_rs_country_moderation_nc', fit_initial
+  )
+  models_dis_aw <- get_mm(
+    form_disobedience_ml, preds_dis_rm, dat_dis_aw,
+    type = 'dis_aw_ml_rs_country_moderation_nc', fit_initial
+  )
+  models_dis_wnw <- get_mm(
+    form_disobedience_ml, preds_dis_rm, dat_dis_wnw,
+    type = 'dis_wnw_ml_rs_country_moderation_nc', fit_initial
+  )
+  
+  nr_models <- length(models_adv_aw)
+  marginal_coefs_int_percentage <- bind_rows(
+    lapply(seq(nr_models), function(i) {
+      get_int_effects(
+        models_adv_aw[[i]], preds_adv_rm[i], 'Advocacy', 'Already do vs willing to', newdata = newdata
+      )
+    }),
+    lapply(seq(nr_models), function(i) {
+      get_int_effects(
+        models_adv_wnw[[i]], preds_adv_rm[i], 'Advocacy', 'Willing to vs not willing to', newdata = newdata
+      )
+    }),
+    lapply(seq(nr_models), function(i) {
+      get_int_effects(
+        models_protest_aw[[i]], preds_protest_rm[i], 'Protest', 'Already do vs willing to', newdata = newdata
+      )
+    }),
+    lapply(seq(nr_models), function(i) {
+      get_int_effects(
+        models_protest_wnw[[i]], preds_protest_rm[i], 'Protest', 'Willing to vs not willing to', newdata = newdata
+      )
+    }),
+    lapply(seq(length(models_dis_aw)), function(i) {
+      get_int_effects(
+        models_dis_aw[[i]], preds_dis_rm[i], 'Disobedience', 'Already do vs willing to', newdata = newdata
+      )
+    }),
+    lapply(seq(length(models_dis_wnw)), function(i) {
+      get_int_effects(
+        models_dis_wnw[[i]], preds_dis_rm[i], 'Disobedience', 'Willing to vs not willing to', newdata = newdata
+      )
+    })
+  )
+  
+  marginal_coefs_int_lor <- bind_rows(
+    lapply(seq(nr_models), function(i) {
+      get_int_effects(
+        models_adv_aw[[i]], preds_adv_rm[i], 'Advocacy',
+        'Already do vs willing to', metric = 'logodds', comparison = 'lnor', mult = 1, newdata = newdata
+      )
+    }),
+    lapply(seq(nr_models), function(i) {
+      get_int_effects(
+        models_adv_wnw[[i]], preds_adv_rm[i], 'Advocacy',
+        'Willing to vs not willing to', metric = 'logodds', comparison = 'lnor', mult = 1, newdata = newdata
+      )
+    }),
+    lapply(seq(nr_models), function(i) {
+      get_int_effects(
+        models_protest_aw[[i]], preds_protest_rm[i], 'Protest',
+        'Already do vs willing to', metric = 'logodds', comparison = 'lnor', mult = 1, newdata = newdata
+      )
+    }),
+    lapply(seq(nr_models), function(i) {
+      get_int_effects(
+        models_protest_wnw[[i]], preds_protest_rm[i], 'Protest',
+        'Willing to vs not willing to', metric = 'logodds', comparison = 'lnor', mult = 1, newdata = newdata
+      )
+    }),
+    lapply(seq(length(models_dis_aw)), function(i) {
+      get_int_effects(
+        models_dis_aw[[i]], preds_dis_rm[i], 'Disobedience',
+        'Already do vs willing to', metric = 'logodds', comparison = 'lnor', mult = 1, newdata = newdata
+      )
+    }),
+    lapply(seq(length(models_dis_wnw)), function(i) {
+      get_int_effects(
+        models_dis_wnw[[i]], preds_dis_rm[i], 'Disobedience',
+        'Willing to vs not willing to', metric = 'logodds', comparison = 'lnor', mult = 1, newdata = newdata
+      )
+    })
+  )
+  
+  marginal_coefs_int_all <- bind_rows(marginal_coefs_int_percentage, marginal_coefs_int_lor)
+  marginal_coefs_int_all$rowname <- predictor_names[marginal_coefs_int_all$rowname]
+  saveRDS(marginal_coefs_int_all, paste0('../results/individual_coefs_ml_int', effect_type, '.RDS'))
+  
+} else {
+  marginal_coefs_int_all <- readRDS(paste0('../results/individual_coefs_ml_int', effect_type, '.RDS'))
+}
+
+marginal_coefs_int_all <- marginal_coefs_int_all %>% 
+  # Need to add main effect of Research_std, since we also want to visualize that
+  bind_rows(filter(marginal_coefs_all, rowname == 'Research relevant to climate')) %>% 
+  filter(outcome != 'Already do vs not willing to') %>% 
+  add_categories(categories) %>% 
+  mutate(Effect = factor(Effect, levels = c('Interaction_lo', 'Main', 'Interaction_hi')))
+```
+
+# Supplement analyses
+Here we report all analyses reported in the supplement.
+
+## Multiple regression analyses: Advocacy & Protest
+We start with estimating multiple multilevel logistic regression models for advocacy, protest, and civil disobedience.
+
+```{r}
+fit_protest_wnw <- run_model(
+  form_protest_ml, '../models/barriers_protest_wnw_ml2.RDS',
+  dat_protest_wnw, cores = 4, chains = 4, family = bernoulli, force = FALSE, iter = 2500, warmup = 500
+)
+
+fit_protest_aw <- run_model(
+  form_protest_ml, '../models/barriers_protest_aw_ml.RDS',
+  dat_protest_aw, cores = 4, chains = 4, family = bernoulli, force = FALSE, iter = 2500, warmup = 500
+)
+
+fit_advocacy_wnw <- run_model(
+  form_advocacy_ml, '../models/barriers_advocacy_wnw_ml.RDS',
+  dat_adv_wnw, cores = 4, chains = 4, family = bernoulli, force = FALSE, iter = 2500, warmup = 500
+)
+fit_advocacy_aw <- run_model(
+  form_advocacy_ml, '../models/barriers_advocacy_aw_ml.RDS',
+  dat_adv_aw, cores = 4, chains = 4, family = bernoulli, force = FALSE, iter = 2500, warmup = 500
+)
+
+fit_disobedience_wnw <- run_model(
+  form_disobedience_ml, '../models/barriers_disobedience_wnw_ml.RDS',
+  dat_dis_wnw, cores = 4, chains = 4, family = bernoulli, force = FALSE, iter = 2500, warmup = 500
+)
+fit_disobedience_aw <- run_model(
+  form_disobedience_ml, '../models/barriers_disobedience_aw_ml.RDS',
+  dat_dis_aw, cores = 4, chains = 4, family = bernoulli, force = FALSE, iter = 2500, warmup = 500
+)
+```
+
+We show marginal effects at the mean averaged across countries for advocacy and protest below. Computing average marginal effects leads to out of memory errors (my computer has 64GB RAM).
+
+```{r}
+coefs_both <- bind_rows(
+  get_effects_multiple(fit_advocacy_wnw, predictor_names, 'Advocacy', 'Willing to vs not willing to'),
+  get_effects_multiple(fit_advocacy_aw, predictor_names, 'Advocacy', 'Already do vs willing to'),
+  get_effects_multiple(fit_protest_wnw, predictor_names, 'Protest', 'Willing to vs not willing to'),
+  get_effects_multiple(fit_protest_aw, predictor_names, 'Protest', 'Already do vs willing to')
+) %>% add_categories(categories)
+
+plot_coefs_both(
+  coefs_both, breaks = seq(-20, 20, 5), xlimits = c(-21, 21),
+  filepath = paste0('../figures/figureS4_advocacy_protest_multiple', effect_type, '.pdf'), width = 10, height = 9,
+  title = 'Multiple logistic regression results'
+)
+```
+
+## Civil disobedience results
+We show the individual and multiple regression results for civil disobedience here.
+
+```{r}
+coefs_dis_null <- bind_rows(
+  get_effects_multiple(fit_disobedience_aw, predictor_names, 'Disobedience', 'Already do vs willing to'),
+  get_effects_multiple(fit_disobedience_wnw, predictor_names, 'Disobedience', 'Willing to vs not willing to')
+) %>% add_categories(categories)
+
+# Merge it with the individual regression results
+coefs_dis_all <- bind_rows(
+  marginal_coefs_all %>% 
+    add_categories(categories) %>% 
+    filter(type == 'Disobedience', metric == 'absolute') %>% 
+    select(rowname, Estimate, Q2.5, Q97.5, outcome, category) %>% 
+    mutate(type = 'Individual regressions', Effect = 'Main'),
+  coefs_dis_null %>% 
+    select(rowname, Estimate, Q2.5, Q97.5, outcome, category) %>% 
+    mutate(type = 'Multiple regression', Effect = 'Main')
+) %>% 
+  mutate(
+    type = factor(type, levels = c('Individual regressions', 'Multiple regression'))
+  )
+
+plot_coefs_both(
+  coefs_dis_all, breaks = seq(-30, 30, 10), order_type = 'Individual regressions', xlimits = c(-35, 35),
+  filepath = paste0('../figures/figureS7_disobedience_results', effect_type, '.pdf'), width = 10, height = 9,
+  title = 'Civil disobedience results'
+)
+```
+
+## Country heterogeneity
+Here we visualize the fixed effects and 95% quantiles for random effects across the 53 countries (52 with more than 10 observations, and a `not specified` country that includes countries that were not provided and those that had less than 10 observations).
+
+```{r}
+# We load the models
+fit_initial <- run_individual_model(
+  form_advocacy_ml, 'barriers_10', dat_adv_aw,
+  type = 'advocacy_aw_ml_final_noint', ml = TRUE, moderation = FALSE, cores = 4, iter = 4000
+)
+
+models_adv_aw <- get_mm(
+  form_advocacy_ml, preds_adv, dat_adv_aw,
+  type = 'advocacy_aw_ml_final_noint', fit_initial
+)
+models_adv_wnw <- get_mm(
+  form_advocacy_ml, preds_adv, dat_adv_wnw,
+  type = 'advocacy_wnw_ml_final_noint', fit_initial
+)
+models_protest_aw <- get_mm(
+  form_protest_ml, preds_protest, dat_protest_aw,
+  type = 'protest_aw_ml_final_noint', fit_initial
+)
+models_protest_wnw <- get_mm(
+  form_protest_ml, preds_protest, dat_protest_wnw,
+  type = 'protest_wnw_ml_final_noint', fit_initial
+)
+models_dis_aw <- get_mm(
+  form_disobedience_ml, preds_dis, dat_dis_aw,
+  type = 'dis_aw_ml_final_noint', fit_initial
+)
+models_dis_wnw <- get_mm(
+  form_disobedience_ml, preds_dis, dat_dis_wnw,
+  type = 'dis_wnw_final_noint', fit_initial
+)
+
+nr_models <- length(models_adv_aw)
+marginal_coefs_country <- bind_rows(
+  lapply(seq(nr_models), function(i) {
+    get_country_variation(
+      models_adv_aw[[i]], preds_adv[i], 'Advocacy', 'Already do vs willing to'
+    )
+  }),
+  lapply(seq(nr_models), function(i) {
+    get_country_variation(
+      models_adv_wnw[[i]], preds_adv[i], 'Advocacy', 'Willing to vs not willing to'
+    )
+  }),
+  
+  lapply(seq(nr_models), function(i) {
+    get_country_variation(
+      models_protest_aw[[i]], preds_protest[i], 'Protest', 'Already do vs willing to'
+    )
+  }),
+  lapply(seq(nr_models), function(i) {
+    get_country_variation(
+      models_protest_wnw[[i]], preds_protest[i], 'Protest', 'Willing to vs not willing to'
+    )
+  }),
+  
+  lapply(seq(length(models_dis_aw)), function(i) {
+    get_country_variation(
+      models_dis_aw[[i]], preds_dis[i], 'Disobedience', 'Already do vs willing to'
+    )
+  }),
+  lapply(seq(length(models_dis_wnw)), function(i) {
+    get_country_variation(
+      models_dis_wnw[[i]], preds_dis[i], 'Disobedience', 'Willing to vs not willing to'
+    )
+  })
+)
+
+marginal_coefs_country$rowname <- predictor_names[marginal_coefs_country$rowname]
+marginal_coefs_country <- marginal_coefs_country %>% 
+  filter(outcome != 'Already do vs not willing to') %>% 
+  add_categories(categories)
+
+plot_coefs_both(
+  filter(marginal_coefs_country, type != 'Disobedience'),
+  breaks = seq(-1.5, 1.5, 0.50), order_type = 'Protest',
+  filepath = '../figures/figureS2_advocacy_protest_country_heterogeneity.pdf',
+  xlimits = c(-1.6, 1.6), width = 10, height = 9, ylabel = 'Log odds ratio',
+  title = 'Heterogeneity of effects across countries'
+)
+```
+
+## Research relatedness to climate
+We show the moderating influence of research relatedness to climate change in percentage change terms ...
+
+```{r}
+plot_coefs_both(
+  filter(marginal_coefs_int_all, type != 'Disobedience', metric == 'absolute'),
+  breaks = breaks, order_type = 'Protest',
+  filepath = paste0('../figures/figureS5_advocacy_protest_climate_int', effect_type, '.pdf'),
+  xlimits = c(-35, 35), width = 10, height = 9,
+  title = 'Percentage change across research relatedness to climate change'
+)
+```
+
+... and in log odds ratio terms.
+
+```{r}
+plot_coefs_both(
+  filter(marginal_coefs_int_all, type != 'Disobedience', metric == 'logodds'),
+  breaks = seq(-2, 2, 1), order_type = 'Protest',
+  filepath = paste0('../figures/figureS6_advocacy_protest_climate_int_logodds', effect_type, '.pdf'), width = 10, height = 9,
+  xlimits = c(-2.5, 2.5), ylab = 'Log odds ratio',
+  title = 'Log odds ratios across research relatedness to climate change'
+)
+```
+
+## Classification performance
+Below we compute the in-sample classification performance. Afterwards, we train the models on 80% of the data and compute the classification performance on the remaining 20%. This uses the multiple multilevel logistic regression models.
+
+### In-sample
+```{r}
+get_measures <- function(preds, fit) {
+  x <-round(preds[, 1])
+  y <- fit$data[, 1]
+  tab <- table(x, y)
+  accuracy <- (tab[1, 1] + tab[2, 2]) / sum(tab)
+  
+  # Positive class is the one which has a '1' as entry
+  cm <- confusionMatrix(as.factor(x), as.factor(y), positive = '1')
+  cm <- c(cm$byClass[-length(cm$byClass)], accuracy)
+  names(cm) <- c(names(cm)[-length(names(cm))], 'Accuracy')
+  cm
+}
+
+get_n <- function(fit) nrow(fit$data)
+get_baserate <- function(fit) {
+  round(mean(fit$data[, 1]), 2)
+}
+
+models <- list(
+  fit_advocacy_wnw, fit_advocacy_aw,
+  fit_protest_wnw, fit_protest_aw,
+  fit_disobedience_wnw, fit_disobedience_aw
+)
+
+if (!file.exists('../models/measures_insample.RDS')) {
+  
+  preds_adv_aw <- predict(fit_advocacy_aw)
+  preds_adv_wnw <- predict(fit_advocacy_wnw)
+  
+  preds_protest_aw <- predict(fit_protest_aw)
+  preds_protest_wnw <- predict(fit_protest_wnw)
+  
+  preds_disobedience_aw <- predict(fit_disobedience_aw)
+  preds_disobedience_wnw <- predict(fit_disobedience_wnw)
+
+  measures <- round(data.frame(
+    rbind(
+      get_measures(preds_adv_wnw, fit_advocacy_wnw),
+      get_measures(preds_adv_aw, fit_advocacy_aw),
+      
+      get_measures(preds_protest_wnw, fit_protest_wnw),
+      get_measures(preds_protest_aw, fit_protest_aw),
+      
+      get_measures(preds_disobedience_wnw, fit_disobedience_wnw),
+      get_measures(preds_disobedience_aw, fit_disobedience_aw)
+    )
+  ), 2)
+
+  measures$Outcome <- rep(
+    c('Willing vs. not willing', 'Already do vs. willing'), 3
+  )
+  measures$Type <- rep(c('Advocacy', 'Protest', 'Disobedience'), each = 2)
+  measures$n <- sapply(models, get_n)
+  measures$Baserate <- sapply(models, get_baserate)
+  
+  measures <- measures %>% 
+    select(
+      Type, Outcome, n, Precision, Recall, Sensitivity,
+      F1, Accuracy, Baserate
+    ) %>% 
+    
+    # Pick the baserate for the outcome that happens most frequently
+    mutate(Baserate = pmax(Baserate, 1 - Baserate)) %>% 
+    arrange(desc(Precision), desc(Recall))
+  
+  saveRDS(measures, '../models/measures_insample.RDS')
+} else {
+  measures <- readRDS('../models/measures_insample.RDS')
+}
+
+# high precision -> when model says person engages, likelihood that s/he actually engages is high
+# high recall -> model identifies most of the actual positive cases
+kable(
+  measures, format = 'html', booktabs = TRUE,
+  caption = 'In-sample classification performance of the various logistic regression models.'
+) %>% kable_styling()
+```
+
+### Out-of-sample
+```{r}
+recompute_model <- function(fit, training_prop = 0.80) {
+  set.seed(1)
+  
+  d <- fit$data
+  
+  # Stratified sampling so to retain
+  # the same proportion of 0s and 1s as in the test set
+  d0 <- d[d[, 1] == 0, ]
+  d1 <- d[d[, 1] == 1, ]
+  
+  n0 <- nrow(d0)
+  n1 <- nrow(d1)
+  train_seq0 <- sample(seq(n0), size = round(training_prop * n0))
+  train_seq1 <- sample(seq(n1), size = round(training_prop * n1))
+  
+  d_train <- rbind(d0[train_seq0, ], d1[train_seq1, ])
+  d_test <- rbind(d0[-train_seq0, ], d1[-train_seq1, ])
+  
+  fit_train <- update(
+    fit, newdata = d_train, recompile = FALSE,
+    chains = 8, cores = 8, iter = 2500, warmup = 500
+  )
+  list('fit_train' = fit_train, 'd_test' = d_test)
+}
+
+get_measures_oos <- function(fit_obj) {
+  fit_train <- fit_obj$fit_train
+  d_test <- fit_obj$d_test
+  pred_test <- predict(fit_train, newdata = d_test)
+  
+  x <-round(pred_test[, 1])
+  y <- d_test[, 1]
+  tab <- table(x, y)
+  accuracy <- (tab[1, 1] + tab[2, 2]) / sum(tab)
+  
+  # Positive class is the one which has a '1' as entry
+  cm <- confusionMatrix(as.factor(x), as.factor(y), positive = '1')
+  cm <- c(cm$byClass[-length(cm$byClass)], accuracy)
+  names(cm) <- c(names(cm)[-length(names(cm))], 'Accuracy')
+  cm
+}
+
+if (!file.exists('../models/measures_outofsample.RDS')) {
+
+  # Train the models on only 80% of the data
+  fit_advocacy_aw_train <- recompute_model(fit_advocacy_aw)
+  fit_advocacy_wnw_train <- recompute_model(fit_advocacy_wnw)
+  
+  fit_protest_aw_train <- recompute_model(fit_protest_aw)
+  fit_protest_wnw_train <- recompute_model(fit_protest_wnw)
+  
+  fit_disobedience_aw_train <- recompute_model(fit_disobedience_aw)
+  fit_disobedience_wnw_train <- recompute_model(fit_disobedience_wnw)
+  
+  fit_all <- list(
+    fit_advocacy_aw_train, fit_advocacy_wnw_train,
+    fit_protest_aw_train, fit_protest_wnw_train,
+    fit_disobedience_aw_train, fit_disobedience_wnw_train
+  )
+  
+  measures_oos <- round(data.frame(
+    rbind(
+      get_measures_oos(fit_advocacy_aw_train),
+      get_measures_oos(fit_advocacy_wnw_train),
+      
+      get_measures_oos(fit_protest_wnw_train),
+      get_measures_oos(fit_protest_aw_train),
+      
+      get_measures_oos(fit_disobedience_wnw_train),
+      get_measures_oos(fit_disobedience_aw_train)
+    )
+  ), 2)
+  
+  n_test <- sapply(fit_all, function(obj) nrow(obj$d_test))
+  n_train <- sapply(fit_all, function(obj) nrow(obj$fit_train$data))
+  measures_oos$Outcome <- rep(
+    c('Willing vs. not willing', 'Already do vs. willing'), 3
+  )
+  measures_oos$Type <- rep(c('Advocacy', 'Protest', 'Disobedience'), each = 2)
+  measures_oos$n_train <- n_train
+  measures_oos$n_test <- n_test
+  measures_oos$Baserate <- sapply(models, get_baserate)
+  
+  measures_oos <- measures_oos %>% 
+    select(
+      Type, Outcome, n_train, n_test, Precision, Recall,
+      Specificity, F1, Accuracy, Baserate
+    ) %>% 
+    mutate(Baserate = pmax(Baserate, 1 - Baserate)) %>% 
+    arrange(desc(Precision), desc(Recall))
+  
+  saveRDS(measures_oos, '../models/measures_outofsample.RDS')
+} else {
+  measures_oos <- readRDS('../models/measures_outofsample.RDS')
+}
+
+kable(
+  measures_oos, format = 'html', booktabs = TRUE,
+  caption = 'Ouf-of-sample classification performance of the various logistic regression models.'
+) %>% kable_styling()
+```
+
+## Barriers descriptives: Protest
+Here we visualize the barriers for participating in legal climate-change related protests, afterwards for advocacy.
+
+```{r, fig.width = 10, fig.height = 12}
+cols <- c('#D95F02', '#7570B3', '#1B9E77')
+
+barriers <- c(
+  'It might negatively affect my reputation',
+  'It might lead to repercussions from my employer, funding agencies, or the government',
+  'I do not know enough about climate change to engage in such actions',
+  'I do not know any groups that already engage in these actions and that I could join',
+  'I am not convinced that such actions would have real impact',
+  'I simply do not have time to engage in them',
+  'I would feel uneasy participating due to my carbon-intense lifestyle'
+)
+
+# Barrier data frames for 'would not be willing to', 'would be willing to', and 'already do / did'
+dat_barriers1 <- make_df(dat_num, barriers, 'BarrierLegal_nW_')
+dat_barriers2 <- make_df(dat_num, barriers, 'BarrierLegal_W_')
+dat_barriers3 <- make_df(dat_num, barriers, 'BarrierLegal_D_')
+
+dat_bar <- dat_barriers1 %>% 
+  mutate(
+    value = coalesce(value, dat_barriers2$value, dat_barriers3$value),
+    condition = ifelse(
+      BehLegal == 0,
+      'Not willing to',
+      ifelse(BehLegal == 1, 'Willing to', 'Already do / did')
+    )
+  ) %>% na.omit
+
+df_relp <- dat_bar %>%
+  group_by(condition, name) %>%
+  mutate(nr_obs = n()) %>%
+  group_by(condition, name, value) %>%
+  summarize(relative_freq = n() / nr_obs) %>% 
+  mutate(
+    condition = factor(condition, levels = c('Not willing to', 'Willing to', 'Already do / did'))
+  )
+
+my_labeller <- function(variable, value) {
+  label_wrap_gen(32)(value)
+}
+
+p_protest <- ggplot(df_relp, aes(x = value, y = relative_freq, fill = condition)) +
+  geom_bar(stat = 'identity', position = 'dodge') +
+  facet_wrap(~ name, labeller = my_labeller) +
+  ylab('Relative frequency') +
+  xlab('') +
+  ptheme2 +
+  scale_fill_manual(values = cols) +
+  scale_y_continuous(breaks = seq(0, 0.70, 0.10), limits = c(0, 0.70)) +
+  ggtitle('Protest barriers') +
+  theme_minimal() +
+  theme(
+    legend.title = element_blank(),
+    legend.position = 'top',
+    plot.title = element_text(hjust = 0.50, size = 16),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+
+p_protest
+ggsave('../figures/figureS8_barriers_protest.pdf', p_protest, width = 7.5, height = 9)
+```
+
+## Barriers descriptives: Advocacy
+```{r, fig.width = 10, fig.height = 12}
+dat_barriers1 <- make_df(dat_num, barriers, 'BarrierEngPub_nW_')
+dat_barriers2 <- make_df(dat_num, barriers, 'BarrierEngPub_W_')
+dat_barriers3 <- make_df(dat_num, barriers, 'BarrierEngPub_D_')
+
+dat_bar <- dat_barriers1 %>% 
+  mutate(
+    value = coalesce(value, dat_barriers2$value, dat_barriers3$value),
+    condition = ifelse(
+      BehLegal == 0,
+      'Not willing to',
+      ifelse(BehLegal == 1, 'Willing to', 'Already do / did')
+    )
+  ) %>% na.omit
+
+df_rela <- dat_bar %>%
+  group_by(condition, name) %>%
+  mutate(nr_obs = n()) %>%
+  group_by(condition, name, value) %>%
+  summarize(relative_freq = n() / nr_obs) %>% 
+  mutate(
+    condition = factor(condition, levels = c('Not willing to', 'Willing to', 'Already do / did'))
+  )
+
+p_advocacy <- ggplot(df_rela, aes(x = value, y = relative_freq, fill = condition)) +
+  geom_bar(stat = 'identity', position = 'dodge') +
+  facet_wrap(~ name, labeller = my_labeller) +
+  ylab('Relative frequency') +
+  xlab('') +
+  ptheme2 +
+  scale_fill_manual(values = cols) +
+  scale_y_continuous(breaks = seq(0, 0.60, 0.10), limits = c(0, 0.60)) +
+  ggtitle('Advocacy barriers') +
+  theme_minimal() +
+  theme(
+    legend.title = element_blank(),
+    legend.position = 'top',
+    plot.title = element_text(hjust = 0.50, size = 16),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+
+p_advocacy
+ggsave('../figures/figureS8_barriers_advocacy.pdf', p_advocacy, width = 7.5, height = 9)
+```
+
+## Number of climate actions
+We count the number of climate actions (13 total, removing teaching and shifting research), 6 of which are lifestyle actions and 7 of which are more advocacy / civic action behaviors. We prepare the respective models and run them.
+
+```{r}
+form_act_lifestyle <- as.formula(paste0('nr_lifestyle_actions | trials(6) ~ ', predictor_vars))
+form_act_advocacy <- as.formula(paste0('nr_advocacy_actions | trials(7) ~ ', predictor_vars))
+
+preds <- get_preds(form_protest)
+preds <- preds[!grepl('barriers_', preds)]
+
+fit_initial_ls <- run_individual_model_binom(
+  'Age_std', dat_final,
+  type = 'lifestyle', ml = TRUE, moderation = FALSE, cores = 4, chains = 4, iter = 4000
+)
+
+fit_initial_adv <- run_individual_model_binom(
+  'Age_std', dat_final,
+  type = 'advocacy', ml = TRUE, moderation = FALSE, cores = 4, chains = 4, iter = 4000
+)
+
+
+if (!file.exists(paste0('../results/individual_binom_coefs', effect_type, '.RDS'))) {
+  grid_binom <- expand.grid(
+    pred = preds,
+    type = c('advocacy', 'lifestyle')
+  )
+  
+  registerDoParallel(cores = 4)
+  res_binom <- foreach(i = seq(nrow(grid_binom))) %dopar% {
+    
+    pred <- as.character(grid_binom[i, 'pred'])
+    type <- as.character(grid_binom[i, 'type'])
+    
+    if (type == 'advocacy') {
+      fit_initial <- fit_initial_adv
+    } else {
+      fit_initial <- fit_initial_ls
+    }
+    
+    run_individual_model_binom(
+      pred, dat_final,
+      type = type, ml = TRUE, moderation = FALSE, cores = 1,
+      chains = 4, iter = 4000, warmup = 500, use_model = fit_initial
+    )
+  }
+  
+  res <- list(
+    'advocacy' = list(),
+    'lifestyle' = list()
+  )
+  
+  for (i in seq(nrow(grid_binom))) {
+    
+    if (i <= 27) {
+      res[['advocacy']][[i]] <- res_binom[[i]]
+    } else {
+      res[['lifestyle']][[i - 27]] <- res_binom[[i]]
+    }
+  }
+  
+  coefs_binom_ls <- do.call('rbind',
+    lapply(seq(length(preds)), function(i) {
+      get_main_effects(
+        res[['lifestyle']][[i]], preds[i], 'Lifestyle (6)', 'Binomial', newdata = newdata
+      )
+    })
+  )
+  
+  coefs_binom_adv <- do.call('rbind',
+    lapply(seq(length(preds)), function(i) {
+      get_main_effects(
+        res[['advocacy']][[i]], preds[i], 'Civic (7)', 'Binomial', newdata = newdata
+      )
+    })
+  )
+  
+  # `get_main_effects` is developed for logistic regression,
+  # so the multiplication by 100 in that function does not make sense. Instead,
+  # for binomial regression, the marginaleffects function avg_comparisons returns
+  # the average number of actions increase / decrease for a unit-level increase
+  # in the predictors. Below we transform the output we got into percentage changes
+  # for binomial regression. In particular, we have x = 100 * expected_number_action_increase.
+  # To get percentage change, we calculate x / 6 for lifestyle and x / 7 for advocacy actions
+  coefs_binom_ls$Estimate <- coefs_binom_ls$Estimate / 6
+  coefs_binom_ls$Q2.5 <- coefs_binom_ls$Q2.5 / 6
+  coefs_binom_ls$Q97.5 <- coefs_binom_ls$Q97.5 / 6
+  
+  coefs_binom_adv$Estimate <- coefs_binom_adv$Estimate / 6
+  coefs_binom_adv$Q2.5 <- coefs_binom_adv$Q2.5 / 6
+  coefs_binom_adv$Q97.5 <- coefs_binom_adv$Q97.5 / 6
+  
+  coefs_binom <- bind_rows(coefs_binom_ls, coefs_binom_adv) %>% 
+    mutate(
+      rowname = predictor_names[rowname],
+      type = factor(type, levels = c('Lifestyle (6)', 'Civic (7)'))
+    )
+  
+  saveRDS(coefs_binom, paste0('../results/individual_binom_coefs', effect_type, '.RDS'))
+} else {
+  coefs_binom <- readRDS(paste0('../results/individual_binom_coefs', effect_type, '.RDS'))
+}
+
+# Order according to 'Civic' estimates
+order_both <- coefs_binom %>% 
+  filter(type == 'Civic (7)') %>%
+  arrange(desc(Estimate))
+
+coefs_binom$rowname <- factor(
+  coefs_binom$rowname, levels = rev(as.character(order_both$rowname))
+)
+```
+
+The effect size is percentage change: for example, a 5 percentage change means that an increase of the predictor by one unit leads to an expected 5% more actions. For advocacy, that would be 7 x 0.05 actions, for lifestyle 6 x 0.05.
+
+```{r}
+cols <- c(brewer.pal(3, 'Set2')[1:2])
+breaks <- seq(-20, 30, 5)
+
+p_actions <- ggplot(coefs_binom, aes(x = rowname, y = Estimate, color = type, group = type)) +
+  geom_hline(aes(yintercept = 0), linewidth = 1, linetype = 'dotted') +
+  geom_point(size = 2.2, position = position_dodge(width = 0.80)) +
+  xlab('') +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.text.y = element_text(size = 12)
+  ) +
+  coord_flip() +
+  scale_color_manual(name = '', values = cols) +
+  geom_errorbar(
+    aes(ymin = Q2.5, ymax = Q97.5), width = 0,
+    linewidth = 1.1, position = position_dodge(width = 0.80)
+  ) +
+  scale_y_continuous(breaks = breaks, limits = c(-12, 30)) +
+  ggtitle('Percentage change for number of climate actions') +
+  theme(
+    legend.position = 'top',
+    legend.text = element_text(size = 12),
+    plot.title = element_text(size = 16)
+  ) +
+  ylab('Percentage change')
+
+p_actions
+ggsave(paste0('../figures/figureS1_binomial_results', effect_type, '.pdf'), p_actions, width = 10, height = 9)
+```
+
+## Pairwise correlations of variables
+We compute Kendall's tau for relevant variables and visualize them below.
+
+```{r}
+dat_corvars <- dat_final %>% 
+  mutate(
+    engaged_protest = as.numeric(BehLegal == 2),
+    engaged_advocacy = as.numeric(Beh_EngPub == 2),
+    engaged_disobedience = as.numeric(Beh_others_7 == 2)
+  ) %>% 
+  select(
+    engaged_advocacy, engaged_protest, engaged_disobedience,
+    'Research_std', all_of(c(preds_adv, preds_protest))
+  )
+
+p <- ncol(dat_corvars)
+cnames <- colnames(dat_corvars)
+
+if (!file.exists('../models/correlations_all_final.RDS')) {
+  
+  comb <- expand.grid(i = seq(p), j = seq(p))
+  
+  registerDoParallel(cores = 8)
+  res <- foreach(iter = seq(nrow(comb)), .combine = rbind) %dopar% {
+    i <- comb[iter, 'i']
+    j <- comb[iter, 'j']
+    
+    if (i != j) {
+      res <- cor.test(dat_corvars[, i], dat_corvars[, j], method = 'kendall')
+      row <- c(res$estimate, res$p.value, i, j)
+      row
+    }
+  }
+  
+  colnames(res) <- c('estimate', 'p.value', 'i', 'j')
+  
+  pvals <- matrix(NA, p, p)
+  tau_mat <- pvals
+  colnames(tau_mat) <- rownames(tau_mat) <- colnames(dat_corvars)
+  
+  for (iter in seq(nrow(res))) {
+    row <- res[iter, ]
+    i <- row[3]
+    j <- row[4]
+    tau <- row[1]
+    pvalue <- row[2]
+    
+    tau_mat[i, j] <- tau_mat[j, i] <- tau
+    pvals[i, j] <- pvals[j, i] <- pvalue
+    
+  }
+  
+  corr_res <- list('cor_mat' = tau_mat, 'pvals' = pvals, 'method' = 'kendall')
+  saveRDS(corr_res, '../models/correlations_all_final.RDS')
+  
+} else {
+  corr_res <- readRDS('../models/correlations_all_final.RDS')
+}
+```
+
+```{r, fig.width = 14, fig.height = 14}
+cormat <- corr_res$cor_mat
+diag(cormat) <- 0
+
+predictor_names <- c(
+  predictor_names,
+  c(
+    'engaged_advocacy' = 'Engaged in advocacy',
+    'engaged_protest' = 'Engaged in protest',
+    'engaged_disobedience' = 'Engaged in civil disobedience'
+  )
+)
+
+rename_barriers <- function(cormat) {
+  p <- nrow(cormat)
+  p_ix <- seq(p - 6, p)
+  a_ix <- p_ix - 7
+  colnames(cormat)[a_ix] <- rownames(cormat)[a_ix] <- paste0(colnames(cormat)[a_ix], ' (A)')
+  colnames(cormat)[p_ix] <- rownames(cormat)[p_ix] <- paste0(colnames(cormat)[p_ix], ' (P)')
+  cormat
+}
+
+colnames(cormat) <- rownames(cormat) <- predictor_names[colnames(cormat)]
+cormat <- rename_barriers(cormat)
+
+ordered_column_names <- c(
+  
+  "Engaged in advocacy",
+  "Engaged in protest",
+  "Engaged in civil disobedience",
+  
+  # Intellectual category
+  "Worry", "Believed climate impacts on self", "Informed on climate", "Personal responsibility",
+  "Academic responsibility", "Responsibility of institutions",
+  "Protest would diminish credibility", "Advocacy would diminish credibility",
+  "Academics should protest more", "Academics should advocate more",
+  
+  "Scientific institutions do enough", "System change required",
+  "Lifestyle change required", "Local actions are effective",
+  "Activists can drive change", "Not much we can do",
+  "Technology will solve problem",
+  
+  # Practical category
+  "Advocate / activist in inner circle",
+  
+  "Do not know enough about climate to engage (A)",
+  "Not convinced of impact (A)", "Lifestyle too carbon-intense (A)",
+  "Do not know any groups (A)", "Negatively affect reputation (A)",
+  "Potential repercussions (A)", "No time (A)",
+  
+  "Do not know enough about climate to engage (P)",
+  "Not convinced of impact (P)", "Lifestyle too carbon-intense (P)",
+  "Do not know any groups (P)", "Negatively affect reputation (P)",
+  "Potential repercussions (P)", "No time (P)",
+  
+  # Background category
+  "Age", "Political orientation", "Carbon-intensity of lifestyle",
+   "Full professor", "Tenure", "Softer science",
+  "Female", "Non-binary / self-described / not disclosed",
+  "Research relevant to climate" 
+)
+
+cormat <- cormat[ordered_column_names, ordered_column_names]
+diag(cormat) <- NA
+
+pdf('../figures/figureS3_cormat.pdf', width = 10, height = 10)
+corrplot(
+  cormat, method = 'color', type = 'upper', number.cex = 0.30,
+  addCoef.col = 'black',
+  tl.cex = 0.75, addrect = 20, tl.col = 'black',
+  na.label = ' '
+)
+dev.off()
+```
+
+```{r}
+corrplot(
+  cormat, method = 'color', type = 'upper', number.cex = 0.30,
+  addCoef.col = 'black',
+  tl.cex = 0.75, addrect = 20, tl.col = 'black',
+  na.label = ' '
+)
+```
+
+# Session info
+```{r}
+sessionInfo()
+```
