@@ -1,4 +1,7 @@
 # Climate Change Engagement of Scientists
+
+[![DOI](https://zenodo.org/badge/817736345.svg)](https://zenodo.org/doi/10.5281/zenodo.12187344)
+
 This repository contains code and data to reproduce all (quantitative) analyses and figures for the paper Dablander, F.<sup>&#11089;</sup>, Sachisthal, M.<sup>&#11089;</sup>, Cologna, V., Strahm, N., Bosshard, A., Grüning, N., Green, A., Brick, C., Aron, A., & Haslbeck, J.M.B.<sup>&#11089;</sup> (accepted). Climate Change Engagement of Scientists. *Nature Climate Change*. [[Link](https://osf.io/preprints/psyarxiv/73w4s)]. If you use these data or code anywhere, please cite the paper.
 
 - `helpers.R` includes useful functions.
